@@ -23,7 +23,9 @@ export const auth = betterAuth({
   },
   plugins: [bearer()],
   trustedOrigins: process.env.BETTER_AUTH_TRUSTED_ORIGINS
-    ? process.env.BETTER_AUTH_TRUSTED_ORIGINS.split(",").map((origin) => origin.trim())
-    : ["http://localhost:3000"],
-  baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:4000",
+    ? process.env.BETTER_AUTH_TRUSTED_ORIGINS.split(",").map((origin) =>
+        origin.trim(),
+      )
+    : ["http://localhost:3000", "http://localhost:5173"],
+  baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
 });
