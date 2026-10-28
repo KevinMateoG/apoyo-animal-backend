@@ -1,7 +1,17 @@
 import "dotenv/config";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AnimalSex, AnimalStatus, UserRole } from "@prisma/client";
 import { auth } from "../src/infrastructure/auth/better-auth.ts";
 import { prisma } from "../src/infrastructure/repository/client.ts";
+import { R2StorageService } from "../src/infrastructure/services/storage.service.ts";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FRONTEND_PUBLIC_DIR = path.resolve(
+  __dirname,
+  "../../apoyo-animal-frontend/public",
+);
 
 const SPECIES_SEED = [
   {
@@ -12,7 +22,8 @@ const SPECIES_SEED = [
     morphology: "9–14 kg, manto dorsal gris plata y garras de 4 cm.",
     habitat: "Sabana seca, matorrales semiáridos y áreas de roca.",
     diet: "Omnívoro oportunista: miel, raíces, larvas y reptiles.",
-    imageUrl: "/tejon-melero.jpg",
+    localFileName: "tejon-melero.jpg",
+    contentType: "image/jpeg",
     catalogLinkLabel: "ver ejemplares de tejon",
   },
   {
@@ -23,7 +34,8 @@ const SPECIES_SEED = [
     morphology: "4–6 kg, pelaje castaño rojizo y falso pulgar prensil.",
     habitat: "Bosques templados con sotobosque de bambú (2.200 m).",
     diet: "95% brotes y follaje de bambú, bayas y líquenes frescos.",
-    imageUrl: "/panda-rojo.jpg",
+    localFileName: "panda-rojo.jpg",
+    contentType: "image/jpeg",
     catalogLinkLabel: "ver ejemplares del panda rojo",
   },
   {
@@ -34,7 +46,8 @@ const SPECIES_SEED = [
     morphology: "100–300 kg, aletas propulsoras y denso pelaje impermeable.",
     habitat: "Playas protegidas, bahías rocosas e islas del Pacífico.",
     diet: "Arenque, calamar y jurel de captura sustentable.",
-    imageUrl: "/sea-lion.png",
+    localFileName: "sea-lion.png",
+    contentType: "image/png",
     catalogLinkLabel: "ver ejemplares del león marino",
   },
 ] as const;
@@ -147,6 +160,34 @@ function birthDateFromAge(ageYears: number): Date {
   return new Date(Date.UTC(currentYear - ageYears, 0, 1));
 }
 
+async function resolveSpeciesImageUrl(
+  storage: R2StorageService,
+  localFileName: string,
+  contentType: string,
+): Promise<string> {
+  if (!storage.isConfigured()) {
+    return `/${localFileName}`;
+  }
+
+  try {
+    const filePath = path.join(FRONTEND_PUBLIC_DIR, localFileName);
+    const buffer = await readFile(filePath);
+    const uploaded = await storage.uploadFile({
+      key: `species/${localFileName}`,
+      body: buffer,
+      contentType,
+    });
+    console.log(`Imagen subida a Cloudflare R2: ${uploaded.url}`);
+    return uploaded.url;
+  } catch (error) {
+    console.warn(
+      `No se pudo subir ${localFileName} a R2, usando ruta local:`,
+      error,
+    );
+    return `/${localFileName}`;
+  }
+}
+
 async function seedUsers() {
   for (const testUser of TEST_USERS) {
     const existing = await prisma.user.findUnique({
@@ -175,12 +216,19 @@ async function seedUsers() {
 }
 
 async function seedCatalog() {
+  const storage = new R2StorageService();
   const speciesByScientificName = new Map<
     string,
     { id: string; imageUrl: string }
   >();
 
   for (const item of SPECIES_SEED) {
+    const imageUrl = await resolveSpeciesImageUrl(
+      storage,
+      item.localFileName,
+      item.contentType,
+    );
+
     const saved = await prisma.species.upsert({
       where: { scientificName: item.scientificName },
       update: {
@@ -189,7 +237,7 @@ async function seedCatalog() {
         morphology: item.morphology,
         habitat: item.habitat,
         diet: item.diet,
-        imageUrl: item.imageUrl,
+        imageUrl,
         catalogLinkLabel: item.catalogLinkLabel,
         isVisible: true,
       },
@@ -200,7 +248,7 @@ async function seedCatalog() {
         morphology: item.morphology,
         habitat: item.habitat,
         diet: item.diet,
-        imageUrl: item.imageUrl,
+        imageUrl,
         catalogLinkLabel: item.catalogLinkLabel,
         isVisible: true,
       },
@@ -264,4 +312,3 @@ main()
     await prisma.$disconnect();
     process.exit(1);
   });
-
