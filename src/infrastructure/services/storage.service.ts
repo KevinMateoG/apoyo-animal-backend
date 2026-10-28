@@ -1,4 +1,9 @@
-import { createHash, createHmac } from "node:crypto";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { AppError } from "../../application/errors/app.error.ts";
 
 export interface UploadFileInput {
@@ -24,42 +29,13 @@ export interface StorageService {
   deleteFile(key: string): Promise<void>;
 }
 
-function sha256Hex(data: Buffer | string): string {
-  return createHash("sha256").update(data).digest("hex");
-}
-
-function hmacSha256(key: Buffer | string, data: string): Buffer {
-  return createHmac("sha256", key).update(data).digest();
-}
-
-function toAmzDates(date = new Date()): { amzDate: string; dateStamp: string } {
-  const iso = date.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  return {
-    amzDate: iso,
-    dateStamp: iso.slice(0, 8),
-  };
-}
-
-function encodeRfc3986(value: string): string {
-  return encodeURIComponent(value).replace(
-    /[!'()*]/g,
-    (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
-}
-
-function encodeS3Path(pathValue: string): string {
-  return pathValue
-    .split("/")
-    .map((segment) => encodeRfc3986(segment))
-    .join("/");
-}
-
 export class R2StorageService implements StorageService {
   private readonly endpoint: string;
   private readonly bucket: string;
   private readonly accessKeyId: string;
   private readonly secretAccessKey: string;
   private readonly publicBaseUrl: string;
+  private readonly client: S3Client | null;
 
   constructor() {
     const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
@@ -77,9 +53,23 @@ export class R2StorageService implements StorageService {
       `http://localhost:${process.env.PORT ?? 3000}`
     ).replace(/\/+$/, "");
 
+    const r2PublicUrl = process.env.R2_PUBLIC_URL?.trim();
     this.publicBaseUrl = (
-      process.env.R2_PUBLIC_URL ?? `${fallbackApiUrl}/api/uploads`
+      r2PublicUrl && r2PublicUrl.length > 0
+        ? r2PublicUrl
+        : `${fallbackApiUrl}/api/uploads`
     ).replace(/\/+$/, "");
+
+    this.client = this.isConfigured()
+      ? new S3Client({
+          region: "auto",
+          endpoint: this.endpoint,
+          credentials: {
+            accessKeyId: this.accessKeyId,
+            secretAccessKey: this.secretAccessKey,
+          },
+        })
+      : null;
   }
 
   isConfigured(): boolean {
@@ -91,76 +81,8 @@ export class R2StorageService implements StorageService {
     );
   }
 
-  private buildSignedHeaders(params: {
-    method: "PUT" | "GET" | "DELETE";
-    canonicalUri: string;
-    payloadHash: string;
-    contentType?: string;
-  }): Record<string, string> {
-    const endpointUrl = new URL(this.endpoint);
-    const host = endpointUrl.host;
-    const { amzDate, dateStamp } = toAmzDates();
-    const region = "auto";
-    const service = "s3";
-
-    const headersMap: Record<string, string> = {
-      host,
-      "x-amz-content-sha256": params.payloadHash,
-      "x-amz-date": amzDate,
-    };
-
-    if (params.contentType) {
-      headersMap["content-type"] = params.contentType;
-    }
-
-    const sortedKeys = Object.keys(headersMap).sort();
-    const canonicalHeaders = sortedKeys
-      .map((key) => `${key}:${headersMap[key].trim()}\n`)
-      .join("");
-    const signedHeaders = sortedKeys.join(";");
-
-    const canonicalRequest = [
-      params.method,
-      params.canonicalUri,
-      "",
-      canonicalHeaders,
-      signedHeaders,
-      params.payloadHash,
-    ].join("\n");
-
-    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-    const stringToSign = [
-      "AWS4-HMAC-SHA256",
-      amzDate,
-      credentialScope,
-      sha256Hex(canonicalRequest),
-    ].join("\n");
-
-    const kDate = hmacSha256(`AWS4${this.secretAccessKey}`, dateStamp);
-    const kRegion = hmacSha256(kDate, region);
-    const kService = hmacSha256(kRegion, service);
-    const kSigning = hmacSha256(kService, "aws4_request");
-    const signature = createHmac("sha256", kSigning)
-      .update(stringToSign)
-      .digest("hex");
-
-    const authorization = `AWS4-HMAC-SHA256 Credential=${this.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-    const requestHeaders: Record<string, string> = {
-      Authorization: authorization,
-      "x-amz-content-sha256": params.payloadHash,
-      "x-amz-date": amzDate,
-    };
-
-    if (params.contentType) {
-      requestHeaders["Content-Type"] = params.contentType;
-    }
-
-    return requestHeaders;
-  }
-
   async uploadFile(input: UploadFileInput): Promise<UploadFileResult> {
-    if (!this.isConfigured()) {
+    if (!this.client) {
       throw new AppError(
         "El almacenamiento Cloudflare R2 no está configurado en el servidor",
         500,
@@ -169,24 +91,19 @@ export class R2StorageService implements StorageService {
     }
 
     const cleanKey = input.key.replace(/^\/+/, "");
-    const canonicalUri = `/${encodeS3Path(`${this.bucket}/${cleanKey}`)}`;
-    const payloadHash = sha256Hex(input.body);
-    const headers = this.buildSignedHeaders({
-      method: "PUT",
-      canonicalUri,
-      payloadHash,
-      contentType: input.contentType,
-    });
 
-    const response = await fetch(`${this.endpoint}${canonicalUri}`, {
-      method: "PUT",
-      headers,
-      body: new Uint8Array(input.body),
-    });
-
-    if (!response.ok) {
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: cleanKey,
+          Body: input.body,
+          ContentType: input.contentType,
+        }),
+      );
+    } catch {
       throw new AppError(
-        `No se pudo subir la imagen a Cloudflare R2 (HTTP ${response.status})`,
+        "No se pudo subir la imagen a Cloudflare R2",
         502,
         "STORAGE_UPLOAD_FAILED",
       );
@@ -199,62 +116,58 @@ export class R2StorageService implements StorageService {
   }
 
   async getFile(key: string): Promise<StoredFileObject | null> {
-    if (!this.isConfigured()) {
+    if (!this.client) {
       return null;
     }
 
     const cleanKey = key.replace(/^\/+/, "");
-    const canonicalUri = `/${encodeS3Path(`${this.bucket}/${cleanKey}`)}`;
-    const payloadHash = sha256Hex("");
-    const headers = this.buildSignedHeaders({
-      method: "GET",
-      canonicalUri,
-      payloadHash,
-    });
 
-    const response = await fetch(`${this.endpoint}${canonicalUri}`, {
-      method: "GET",
-      headers,
-    });
+    try {
+      const response = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: cleanKey,
+        }),
+      );
 
-    if (response.status === 404) {
-      return null;
-    }
+      if (!response.Body) {
+        return null;
+      }
 
-    if (!response.ok) {
+      const bytes = await response.Body.transformToByteArray();
+      return {
+        body: Buffer.from(bytes),
+        contentType: response.ContentType ?? "application/octet-stream",
+      };
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "name" in error &&
+        (error as { name?: string }).name === "NoSuchKey"
+      ) {
+        return null;
+      }
+
       throw new AppError(
-        `Error al leer el archivo desde Cloudflare R2 (HTTP ${response.status})`,
+        "Error al leer el archivo desde Cloudflare R2",
         502,
         "STORAGE_READ_FAILED",
       );
     }
-
-    const arrayBuffer = await response.arrayBuffer();
-    return {
-      body: Buffer.from(arrayBuffer),
-      contentType:
-        response.headers.get("content-type") ?? "application/octet-stream",
-    };
   }
 
   async deleteFile(key: string): Promise<void> {
-    if (!this.isConfigured()) {
+    if (!this.client) {
       return;
     }
 
     const cleanKey = key.replace(/^\/+/, "");
-    const canonicalUri = `/${encodeS3Path(`${this.bucket}/${cleanKey}`)}`;
-    const payloadHash = sha256Hex("");
-    const headers = this.buildSignedHeaders({
-      method: "DELETE",
-      canonicalUri,
-      payloadHash,
-    });
-
-    await fetch(`${this.endpoint}${canonicalUri}`, {
-      method: "DELETE",
-      headers,
-    });
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: cleanKey,
+      }),
+    );
   }
 }
-
