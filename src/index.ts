@@ -1,3 +1,4 @@
+/// <reference path="./cors.d.ts" />
 import "dotenv/config";
 import cors from "cors";
 import express, { type Express, type Request, type Response } from "express";
