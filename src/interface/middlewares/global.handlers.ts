@@ -59,6 +59,17 @@ export function errorMiddleware(
       });
       return;
     }
+
+    if (err.code === "P2020") {
+      res.status(400).json({
+        error: {
+          code: "BAD_REQUEST",
+          message:
+            "El valor ingresado supera el límite máximo permitido por el sistema",
+        },
+      });
+      return;
+    }
   }
 
   if (

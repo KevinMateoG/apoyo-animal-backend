@@ -16,6 +16,7 @@ export interface CreateSponsorshipDto {
 }
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_SPONSORSHIP_AMOUNT = 10_000_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -47,6 +48,10 @@ export function validateCreateSponsorshipDto(
   const amount = Number(body.amount);
   if (!Number.isFinite(amount) || amount < 1) {
     details.amount = ["El monto del aporte debe ser un número mayor o igual a 1"];
+  } else if (amount > MAX_SPONSORSHIP_AMOUNT) {
+    details.amount = [
+      "El monto del aporte no puede superar los $10.000.000 COP",
+    ];
   }
 
   let animalId: string | null = null;
