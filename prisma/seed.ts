@@ -58,7 +58,7 @@ const ANIMALS_SEED = [
     scientificName: "Mellivora capensis",
     ageYears: 2,
     sex: AnimalSex.FEMALE,
-    description: "Dieta enriquecida con miel pura y raíces silvestres.",
+    description: "Dieta enriquimagenesecida con miel pura y raíces silvestres.",
   },
   {
     name: "Boc",
