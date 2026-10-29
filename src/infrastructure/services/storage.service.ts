@@ -29,8 +29,9 @@ export interface StorageService {
   deleteFile(key: string): Promise<void>;
 }
 
-export class R2StorageService implements StorageService {
+export class S3StorageService implements StorageService {
   private readonly endpoint: string;
+  private readonly region: string;
   private readonly bucket: string;
   private readonly accessKeyId: string;
   private readonly secretAccessKey: string;
@@ -40,30 +41,43 @@ export class R2StorageService implements StorageService {
   constructor() {
     const accountId = process.env.CLOUDFLARE_ACCOUNT_ID ?? "";
     const rawEndpoint =
+      process.env.AWS_ENDPOINT_URL_S3 ??
       process.env.S3_API_ENDPOINT ??
       (accountId ? `https://${accountId}.r2.cloudflarestorage.com` : "");
 
     this.endpoint = rawEndpoint.replace(/\/+$/, "");
-    this.bucket = process.env.R2_BUCKET_NAME ?? "";
-    this.accessKeyId = process.env.R2_ACCESS_KEY_ID ?? "";
-    this.secretAccessKey = process.env.R2_SECRET_ACCESS_KEY ?? "";
+    this.region = process.env.AWS_REGION ?? "auto";
+    this.bucket =
+      process.env.AWS_S3_BUCKET ??
+      process.env.R2_BUCKET_NAME ??
+      "apoyo-animal";
+    this.accessKeyId =
+      process.env.AWS_ACCESS_KEY_ID ?? process.env.R2_ACCESS_KEY_ID ?? "";
+    this.secretAccessKey =
+      process.env.AWS_SECRET_ACCESS_KEY ??
+      process.env.R2_SECRET_ACCESS_KEY ??
+      "";
 
     const fallbackApiUrl = (
       process.env.BETTER_AUTH_URL ??
       `http://localhost:${process.env.PORT ?? 3000}`
     ).replace(/\/+$/, "");
 
-    const r2PublicUrl = process.env.R2_PUBLIC_URL?.trim();
+    const customPublicUrl = (
+      process.env.S3_PUBLIC_URL ?? process.env.R2_PUBLIC_URL
+    )?.trim();
     this.publicBaseUrl = (
-      r2PublicUrl && r2PublicUrl.length > 0
-        ? r2PublicUrl
+      customPublicUrl && customPublicUrl.length > 0
+        ? customPublicUrl
         : `${fallbackApiUrl}/api/uploads`
     ).replace(/\/+$/, "");
 
     this.client = this.isConfigured()
       ? new S3Client({
-          region: "auto",
+          region: this.region,
           endpoint: this.endpoint,
+          forcePathStyle: true,
+          requestChecksumCalculation: "WHEN_REQUIRED",
           credentials: {
             accessKeyId: this.accessKeyId,
             secretAccessKey: this.secretAccessKey,
@@ -84,7 +98,7 @@ export class R2StorageService implements StorageService {
   async uploadFile(input: UploadFileInput): Promise<UploadFileResult> {
     if (!this.client) {
       throw new AppError(
-        "El almacenamiento Cloudflare R2 no está configurado en el servidor",
+        "El almacenamiento S3 no está configurado en el servidor",
         500,
         "STORAGE_NOT_CONFIGURED",
       );
@@ -103,7 +117,7 @@ export class R2StorageService implements StorageService {
       );
     } catch {
       throw new AppError(
-        "No se pudo subir la imagen a Cloudflare R2",
+        "No se pudo subir la imagen al almacenamiento",
         502,
         "STORAGE_UPLOAD_FAILED",
       );
@@ -144,13 +158,14 @@ export class R2StorageService implements StorageService {
         typeof error === "object" &&
         error !== null &&
         "name" in error &&
-        (error as { name?: string }).name === "NoSuchKey"
+        ((error as { name?: string }).name === "NoSuchKey" ||
+          (error as { name?: string }).name === "NotFound")
       ) {
         return null;
       }
 
       throw new AppError(
-        "Error al leer el archivo desde Cloudflare R2",
+        "Error al leer el archivo desde el almacenamiento",
         502,
         "STORAGE_READ_FAILED",
       );
@@ -171,3 +186,5 @@ export class R2StorageService implements StorageService {
     );
   }
 }
+
+export { S3StorageService as R2StorageService };
